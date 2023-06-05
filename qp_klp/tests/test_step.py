@@ -8,12 +8,13 @@
 from unittest import TestCase
 from qp_klp.Step import Step
 from sequence_processing_pipeline.Pipeline import Pipeline
-from os.path import join, abspath
+from os.path import join, abspath, dirname
 from functools import partial
 from os import makedirs, chmod, access, W_OK
 from shutil import rmtree
 from os import environ, remove, getcwd
 from json import dumps
+import sys
 
 
 class FakeClient():
@@ -53,7 +54,7 @@ class FakeClient():
                                  '11661.11.18', '11661.11.43', '11661.11.64',
                                  '11661.12.15']
 
-        self.samples_in_6123 = ['3A', '4A', '5B', '6A', 'BLANK_41_12G', '7A',
+        self.samples_in_6123 = ['3A', '4A', '5B', '6A', 'BLANK.41.12G', '7A',
                                 '8A', 'ISB', 'GFR', '6123']
 
         self.info_in_11661 = {'number-of-samples': 10,
@@ -270,6 +271,8 @@ class BaseStepTests(TestCase):
         if stage >= 1:
             fake_path = join(self.output_file_path, 'ConvertJob', 'logs')
             makedirs(fake_path, exist_ok=True)
+            fake_path = join(self.output_file_path, 'ConvertJob', 'Reports')
+            makedirs(fake_path, exist_ok=True)
 
             self._create_fake_bin('sbatch', "echo 'Submitted "
                                             "batch job 9999999'")
@@ -413,6 +416,9 @@ class BasicStepTests(BaseStepTests):
                                           self.qiita_id)
 
         self.assertIsNotNone(pipeline)
+
+        # don't construct a fake pipeline type to test Error raise on an
+        # unknown pipeline type. Rely on pipeline testing for that.
 
     def test_get_project_info(self):
         obs = self.pipeline.get_project_info()
@@ -583,7 +589,7 @@ class BasicStepTests(BaseStepTests):
     def test_get_tube_ids_from_qiita(self):
         fake_client = FakeClient()
         step = Step(self.pipeline, self.qiita_id, None)
-        step.get_tube_ids_from_qiita(fake_client)
+        step._get_tube_ids_from_qiita(fake_client)
         obs = step.tube_id_map
 
         exp = {'13059': {'SP331130A04': 'SP331130A-4',
@@ -602,3 +608,67 @@ class BasicStepTests(BaseStepTests):
                          '12.15': '12.15'}}
 
         self.assertDictEqual(obs, exp)
+
+    def test_compare_samples_against_qiita(self):
+        fake_client = FakeClient()
+        step = Step(self.pipeline, self.qiita_id, None)
+        results = step._compare_samples_against_qiita(fake_client)
+
+        # confirm projects in results match what's expected
+        obs = set([x['project_name'] for x in results])
+        exp = {"NYU_BMS_Melanoma", "Feist", "Gerwick"}
+        self.assertEqual(obs, exp)
+
+        # confirm projects using tube-ids match what's expected
+
+        # results are a list of project dicts, rather than a dict of dicts.
+        # however they are faked and can be expected to be returned in a
+        # fixed order. Assert the order is as expected so the following tests
+        # will be meaningful.
+        self.assertEqual(results[0]['project_name'], 'NYU_BMS_Melanoma')
+        self.assertEqual(results[1]['project_name'], 'Feist')
+        self.assertEqual(results[2]['project_name'], 'Gerwick')
+
+        self.assertEqual(results[0]['tids'], True)
+        self.assertEqual(results[1]['tids'], True)
+        self.assertEqual(results[2]['tids'], False)
+
+        # 'EP448041B04' is a sample-name from the sample-sheet and should not
+        # be in fake-Qiita, as defined in FakeQiita() class. Therefore, it
+        # should appear in the 'samples_not_in_qiita' list.
+        self.assertTrue('EP448041B04' in results[0]['samples_not_in_qiita'])
+
+        # 'BLANK3.3B' is defined in the sample-sheet and also in FakeQiita,
+        # both as a sample-name and as a tube-id (One of the few to be so
+        # named). It shouldn't appear in 'samples_not_in_qiita' list.
+        self.assertTrue('BLANK3.3B' not in results[0]['samples_not_in_qiita'])
+
+        # 'SP331130A-4' is a tube-id in qiita and should be present in the
+        # 'examples_in_qiita' list
+        # the tube-ids in 'examples_in_qiita' list should be a subset of all
+        # the tube-ids in FakeQiita().
+        exp = {'SP331130A-4', 'AP481403B-2', 'LP127829A-2', 'BLANK3.3B',
+               'EP529635B02', 'EP542578B-4', 'EP446602B-1', 'EP121011B-1',
+               'EP636802A-1', 'SP573843A-4'}
+
+        self.assertTrue(set(results[0]['examples_in_qiita']).issubset(exp))
+
+        # Gerwick has a small number of samples in the sample-sheet, and all
+        # of which are in FakeQiita().
+        self.assertEqual(results[2]['samples_not_in_qiita'], set())
+
+    def test_generate_prep_files(self):
+        self._delete_test_output()
+        # for seqpro test, we won't create a fake bin; we'll use the real one.
+        self._create_test_input(4)
+
+        step = Step(self.pipeline, self.qiita_id, None) # noqa
+        config = BaseStepTests.CONFIGURATION['configuration']['seqpro'] # noqa
+
+        real_seqpro_path = join(dirname(sys.executable), 'seqpro')  # noqa
+
+        # results = step._generate_prep_file(config,
+        #                                    self.good_sample_sheet_path,
+        #                                    real_seqpro_path,
+        #                                    ["NYU_BMS_Melanoma", "Feist",
+        #                                    "Gerwick"])
