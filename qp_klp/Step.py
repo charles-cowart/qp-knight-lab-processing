@@ -660,12 +660,12 @@ class Step:
         self.generate_prep_file()
 
         increment_status()
-        sifs = self.generate_sifs(qclient)
+        self.sifs = self.generate_sifs(qclient)
 
         increment_status()
 
         if update:
-            Step.update_blanks_in_qiita(sifs, qclient)
+            self.update_blanks_in_qiita(qclient)
 
         prep_file_paths = self.get_prep_file_paths()
 
