@@ -328,7 +328,6 @@ class Step:
 
     def _generate_commands(self):
         out_dir = self.pipeline.output_path
-        qclient = self.qclient
 
         cmds = ['tar zcvf logs-ConvertJob.tgz ConvertJob/logs',
                 'tar zcvf logs-FastQCJob.tgz FastQCJob/logs',
@@ -337,12 +336,25 @@ class Step:
                 'tar zcvf prep-files.tgz GenPrepFileJob/PrepFiles']
         self.cmds = [f'cd {out_dir}; {x}' for x in cmds]
 
-        data = []
         for project, _, qiita_id in self.special_map:
             if self.pipeline.pipeline_type in Step.META_TYPES:
                 self.cmds.append(f'cd {out_dir}; tar zcvf reports-QCJob.tgz '
                                  f'QCJob/{project}/fastp_reports_dir')
 
+        if exists(join(out_dir, 'failed_samples.html')):
+            tmp = f'cd {out_dir}; mv failed_samples.html final_results'
+            self.cmds.append(tmp)
+
+        if exists(join(out_dir, 'touched_studies.html')):
+            tmp = f'cd {out_dir}; mv touched_studies.html final_results'
+            self.cmds.append(tmp)
+
+    def load_preps_into_qiita(self):
+        out_dir = self.pipeline.output_path
+        qclient = self.qclient
+
+        data = []
+        for project, _, qiita_id in self.special_map:
             if len(self.touched_studies_prep_info[qiita_id]) != 1:
                 raise ValueError(
                     f"Too many preps for {qiita_id}: "
@@ -402,10 +414,6 @@ class Step:
             f.write(df.to_html(border=2, index=False, justify="left",
                                render_links=True, escape=False))
 
-        if exists(join(out_dir, 'failed_samples.html')):
-            tmp = f'cd {out_dir}; mv failed_samples.html final_results'
-            self.cmds.append(tmp)
-
     def write_commands_to_output_path(self):
         self.cmds_log_path = join(self.pipeline.output_path, 'cmds.log')
         with open(self.cmds_log_path, 'w') as f:
@@ -461,7 +469,7 @@ class Step:
     def get_prep_file_paths(self):
         return self.prep_file_paths
 
-    def get_tube_ids_from_qiita(self, qclient):
+    def _get_tube_ids_from_qiita(self, qclient):
         # Update get_project_info() so that it can return a list of
         # samples in projects['samples']. Include blanks in projects['blanks']
         # just in case there are duplicate qiita_ids
@@ -495,8 +503,9 @@ class Step:
         self.tube_id_map = tids_by_qiita_id
         self.samples_in_qiita = sample_names_by_qiita_id
 
-    def compare_samples_against_qiita(self):
+    def _compare_samples_against_qiita(self, qclient):
         projects = self.pipeline.get_project_info(short_names=True)
+        self._get_tube_ids_from_qiita(qclient)
 
         results = []
         for project in projects:
@@ -505,7 +514,7 @@ class Step:
 
             # get list of samples as presented by the sample-sheet or mapping
             # file and confirm that they are all registered in Qiita.
-            samples = set(self.pipeline.get_sample_names())
+            samples = set(self.pipeline.get_sample_names(project_name))
 
             # strip any leading zeroes from the sample-ids. Note that
             # if a sample-id has more than one leading zero, all of
@@ -523,19 +532,21 @@ class Step:
                 used_tids = True
             else:
                 # assume project is in samples_in_qiita
-                not_in_qiita = samples - set(self.samples_in_qiita)
+                not_in_qiita = samples - set(self.samples_in_qiita[qiita_id])
                 examples = list(samples)[:5]
                 used_tids = False
 
             # convert to strings before returning
             examples = [str(x) for x in examples]
 
-            if not_in_qiita:
-                # if there are actual differences
-                results.append({'samples_not_in_qiita': not_in_qiita,
-                                'examples_in_qiita': examples,
-                                'project_name': project_name,
-                                'tids': used_tids})
+            # return an entry for all projects, even when samples_not_in_qiita
+            # is an empty list, as the information is still valuable.
+
+            results.append({'samples_not_in_qiita': not_in_qiita,
+                            'examples_in_qiita': examples,
+                            'project_name': project_name,
+                            'tids': used_tids})
+
         return results
 
     @classmethod
@@ -637,6 +648,32 @@ class Step:
 
                 return data
 
+    def precheck(self, qclient):
+        # compare sample-ids/tube-ids in sample-sheet/mapping file
+        # against what's in Qiita.
+        results = self._compare_samples_against_qiita(qclient)
+
+        if results is not None:
+            msgs = []
+            for comparison in results:
+                not_in_qiita_count = len(comparison['samples_not_in_qiita'])
+                examples_in_qiita = ', '.join(comparison['examples_in_qiita'])
+                p_name = comparison['project_name']
+                uses_tids = comparison['tids']
+
+                msgs.append(f"Project '{p_name}' has {not_in_qiita_count} "
+                            "samples not registered in Qiita.")
+
+                msgs.append(f"Some registered samples in Project '{p_name}'"
+                            f" include: {examples_in_qiita}")
+
+                if uses_tids:
+                    msgs.append(f"Project '{p_name}' is using tube-ids. You "
+                                "may be using sample names in your file.")
+
+            if msgs:
+                raise PipelineError('\n'.join(msgs))
+
     def execute_pipeline(self, qclient, increment_status, update=True):
         '''
         Executes steps of pipeline in proper sequence.
@@ -676,6 +713,9 @@ class Step:
             self.update_prep_templates(qclient, prep_file_paths, ptype)
 
         self.generate_touched_studies(qclient)
+
+        increment_status()
+        self.load_preps_into_qiita()
 
         increment_status()
         self.generate_commands(qclient)
