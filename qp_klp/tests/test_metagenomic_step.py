@@ -209,6 +209,14 @@ class MetagenomicTests(BaseStepTests):
                     if m:
                         obs[i] = obs[i].replace(m[1], 'REMOVED')
 
+            print("###OBS###")
+            for item in obs:
+                print(item)
+            print("####")
+            print("###EXP###")
+            for item in exp:
+                print(item)
+            print("####")
             for obs_line, exp_line in zip(obs, exp):
                 self.assertEqual(obs_line, exp_line)
 
